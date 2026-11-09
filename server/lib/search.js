@@ -46,6 +46,10 @@ function parseQuery(q) {
   const min = text.match(/(?:over|above|more than|at least|from)\s*(?:kes|ksh|rwf|usd|\$)?\s*([\d,.]+)\s*(k|m|million)?\b/);
   if (min) { out.price_min = money(min[1], min[2]); text = text.replace(min[0], ' '); }
 
+  // A named currency narrows results, so "1 million RWF" doesn't match KES listings.
+  const cur = text.match(/\b(kes|kshs|ksh|rwf|frw|usd|ugx|tzs)\b|\$/);
+  if (cur) out.currency = cur[1] ? ({ ksh: 'KES', kshs: 'KES', frw: 'RWF' }[cur[1]] || cur[1].toUpperCase()) : 'USD';
+
   const pu = text.match(/\b(per|a|\/)\s*(year|month|season)\b|\b(yearly|annually|monthly)\b/);
   if (pu) out.price_unit = pu[2] || (pu[3] === 'monthly' ? 'month' : 'year');
 

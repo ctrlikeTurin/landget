@@ -107,7 +107,10 @@ async function askModel(history, msg, results, searched, relaxed) {
       models: MODELS,
       messages: [{ role: 'system', content: system }, ...history, { role: 'user', content: msg }],
       temperature: 0.3,
-      max_tokens: 500,
+      // Current free models reason before answering; keep that short and out of the reply,
+      // or the token budget is spent thinking and the answer comes back empty.
+      max_tokens: 1500,
+      reasoning: { effort: 'low', exclude: true },
     }),
     signal: AbortSignal.timeout(30000),
   });
