@@ -94,7 +94,7 @@ async function askModel(history, msg, results, searched, relaxed) {
     headers: {
       Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': process.env.APP_URL || 'http://localhost:3000',
+      'HTTP-Referer': (process.env.APP_URL || 'http://localhost:3000').split(',')[0].trim(),
       'X-Title': 'LandLink',
     },
     body: JSON.stringify({

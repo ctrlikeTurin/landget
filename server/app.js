@@ -38,12 +38,19 @@ app.use((req, _res, next) => { if (!req.body) req.body = {}; next(); }); // Expr
 app.use(cookieParser());
 app.use(loadUser);
 
+// Public addresses that proxy to this server (e.g. the Cloudflare Pages front door), from APP_URL.
+const PUBLIC_ORIGINS = String(process.env.APP_URL || '').split(',').map((u) => {
+  try { return new URL(u.trim()).origin; } catch { return null; }
+}).filter(Boolean);
+
 // Simple CSRF guard: state-changing API calls must come from our own origin.
 // The cookie is SameSite=Lax too; this blocks cross-site form posts in older browsers.
 app.use('/api', (req, res, next) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   const origin = req.get('origin');
-  if (origin && origin !== `${req.protocol}://${req.get('host')}`) return res.status(403).json({ error: 'Cross-site request blocked.' });
+  if (origin && origin !== `${req.protocol}://${req.get('host')}` && !PUBLIC_ORIGINS.includes(origin)) {
+    return res.status(403).json({ error: 'Cross-site request blocked.' });
+  }
   next();
 });
 
