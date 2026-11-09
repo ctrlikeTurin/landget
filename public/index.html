@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1f6f43">
+  <meta name="description" content="LandLink: find verified land to lease, buy or farm in partnership in Kenya and Rwanda.">
+  <title>LandLink</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f6f43'/%3E%3Cpath d='M5 22l7-8 5 5 4-4 6 7z' fill='%23d9f2c4'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <a href="#/" class="brand" aria-label="LandLink home">
+      <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="7" fill="var(--brand)"/><path d="M5 22l7-8 5 5 4-4 6 7z" fill="var(--brand-soft)"/></svg>
+      <span data-i18n="brand">LandLink</span>
+    </a>
+    <nav id="nav" class="nav" aria-label="Main"></nav>
+    <div class="top-actions">
+      <button id="themeBtn" class="icon-btn" type="button" aria-label="Toggle theme" title="Toggle theme">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+      </button>
+      <a id="bellBtn" class="icon-btn hidden" href="#/notifications" aria-label="Notifications">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2zm6-6V11a6 6 0 0 0-5-5.9V4a1 1 0 0 0-2 0v1.1A6 6 0 0 0 6 11v5l-2 2v1h16v-1z"/></svg>
+        <span id="bellCount" class="badge-count hidden"></span>
+      </a>
+      <button id="menuBtn" class="icon-btn menu-btn" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1"></main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <dialog id="dialog" class="dialog"></dialog>
+
+  <!-- Chatbot -->
+  <button id="chatFab" class="chat-fab" type="button" aria-label="Open the LandLink assistant" aria-expanded="false" aria-controls="chatPanel">
+    <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2z"/></svg>
+  </button>
+  <section id="chatPanel" class="chat-panel hidden" aria-label="LandLink assistant">
+    <header class="chat-head">
+      <strong data-i18n="chat_title">LandLink assistant</strong>
+      <span id="chatSource" class="muted small"></span>
+      <button id="chatClose" class="icon-btn" type="button" aria-label="Close assistant">✕</button>
+    </header>
+    <div id="chatLog" class="chat-log" aria-live="polite"></div>
+    <form id="chatForm" class="chat-form">
+      <label for="chatInput" class="sr-only">Message</label>
+      <input id="chatInput" autocomplete="off" maxlength="1000" data-i18n-placeholder="chat_placeholder">
+      <button class="btn primary" type="submit" data-i18n="send">Send</button>
+    </form>
+  </section>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script src="/i18n.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

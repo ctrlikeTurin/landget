@@ -1,0 +1,65 @@
+require('dotenv').config({ quiet: true });
+const path = require('path');
+const express = require('express');
+const helmet = require('helmet');
+const cookieParser = require('cookie-parser');
+const { rateLimit } = require('express-rate-limit');
+const { loadUser } = require('./middleware/auth');
+const { PUBLIC_DIR } = require('./lib/upload');
+
+const app = express();
+app.set('trust proxy', 1); // Render/Railway sit behind one proxy
+
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      'script-src': ["'self'", 'https://unpkg.com'],
+      'style-src': ["'self'", "'unsafe-inline'", 'https://unpkg.com'],
+      'img-src': ["'self'", 'data:', 'blob:', 'https://*.tile.openstreetmap.org', 'https://server.arcgisonline.com', 'https://unpkg.com'],
+      'connect-src': ["'self'", 'https://nominatim.openstreetmap.org'],
+      'frame-src': ["'self'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+}));
+app.use(express.json({ limit: '200kb' }));
+app.use(express.urlencoded({ extended: false, limit: '200kb' }));
+app.use((req, _res, next) => { if (!req.body) req.body = {}; next(); }); // Express 5 leaves it undefined
+app.use(cookieParser());
+app.use(loadUser);
+
+// Simple CSRF guard: state-changing API calls must come from our own origin.
+// The cookie is SameSite=Lax too; this blocks cross-site form posts in older browsers.
+app.use('/api', (req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  const origin = req.get('origin');
+  if (origin && origin !== `${req.protocol}://${req.get('host')}`) return res.status(403).json({ error: 'Cross-site request blocked.' });
+  next();
+});
+
+app.use('/api', rateLimit({ windowMs: 60 * 1000, limit: process.env.NODE_ENV === 'test' ? 10000 : 300, standardHeaders: 'draft-7', legacyHeaders: false }));
+
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/listings', require('./routes/listings').router);
+app.use('/api/offers', require('./routes/offers'));
+app.use('/api/messages', require('./routes/messages').router);
+app.use('/api/admin', require('./routes/admin'));
+app.use('/api/chat', require('./routes/chat'));
+app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/files', require('./routes/files'));
+app.get('/api/health', (_req, res) => res.json({ ok: true }));
+app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
+
+// Only listing photos are public. uploads/private has no static route at all.
+app.use('/uploads', express.static(PUBLIC_DIR, { maxAge: '7d', index: false }));
+app.use(express.static(path.join(__dirname, '..', 'public')));
+
+// eslint-disable-next-line no-unused-vars
+app.use((err, _req, res, _next) => {
+  const status = err.status || err.statusCode || 500;
+  if (status >= 500) console.error(err);
+  res.status(status).json({ error: status >= 500 ? 'Something went wrong. Please try again.' : err.message });
+});
+
+module.exports = app;
