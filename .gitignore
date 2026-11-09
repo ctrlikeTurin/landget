@@ -4,3 +4,4 @@ data/*.db*
 uploads/private/
 uploads/public/*
 !uploads/public/.gitkeep
+.wrangler/
