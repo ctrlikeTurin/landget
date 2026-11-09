@@ -39,7 +39,16 @@
   const place = (l) => [l.town, l.region, l.country].filter(Boolean).join(', ');
   const typePills = (l) => l.listing_types.map((x) => `<span class="pill type">${esc(t(x))}</span>`).join(' ');
   const statusPill = (s) => `<span class="pill ${s === 'verified' ? 'verified' : s === 'pending' ? 'pending' : s === 'rejected' ? 'rejected' : ''}">${esc(t(`status_${s}`))}</span>`;
-  const verifiedPill = `<span class="pill verified" title="Documents checked by LandLink"><svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>${esc(t('verified'))}</span>`;
+  // Verification levels: 1 documents checked, 2 official title search, 3 LandLink site visit.
+  const LEVEL_BADGE = [null,
+    ['✓ Docs checked', 'An admin checked the title deed and owner ID'],
+    ['✓✓ Title confirmed', 'Official title search confirmed the owner'],
+    ['★ Site visited', 'A LandLink agent visited the land']];
+  const levelPill = (l) => {
+    const b = LEVEL_BADGE[l.verification_level || 0];
+    return b ? `<span class="pill verified level-${l.verification_level}" title="${esc(b[1])}">${esc(b[0])}</span>` : '';
+  };
+  const sitePill = '<span class="pill site" title="The owner photographed the land on site, with GPS matching the pin">📍 Owner on site</span>';
   const coverImg = (l, cls = '') => (l.cover ? `<img src="${esc(l.cover)}" alt="" loading="lazy" class="${cls}">` : `<div class="noimg ${cls}" aria-hidden="true"></div>`);
   const loading = () => `<div class="empty"><span class="spinner"></span> ${esc(t('loading'))}</div>`;
   const empty = (title, hint = '') => `<div class="empty"><svg viewBox="0 0 24 24" width="48" height="48" aria-hidden="true"><path fill="currentColor" d="M3 20h18L14 8l-4 6-2-3z"/></svg><p><strong>${esc(title)}</strong></p>${hint ? `<p class="small">${esc(hint)}</p>` : ''}</div>`;
@@ -263,7 +272,7 @@
         <a class="card lcard" href="#/listing/${l.id}" data-id="${l.id}">
           ${coverImg(l)}
           <div>
-            <div class="row" style="gap:4px">${verifiedPill} ${typePills(l)}</div>
+            <div class="row" style="gap:4px">${levelPill(l)} ${typePills(l)}</div>
             <h3>${esc(l.title)}</h3>
             <div class="price">${esc(priceText(l))}${l.negotiable ? ` <span class="muted small">· ${esc(t('negotiable'))}</span>` : ''}</div>
             <div class="meta">${esc(sizeText(l))} · ${esc(t(l.land_type))} · ${esc(place(l))}${l.distance_km != null ? ` · ${l.distance_km} km` : ''}</div>
@@ -340,7 +349,7 @@
               ${l.photos.length ? `<img class="main" id="mainPhoto" src="${esc(l.photos[0].url)}" alt="Photo 1 of ${esc(l.title)}">` : '<div class="main skeleton" style="animation:none"></div>'}
               ${l.photos.length > 1 ? `<div class="thumbs" role="list">${l.photos.map((p, i) => `<button type="button" role="listitem" data-src="${esc(p.url)}" data-i="${i + 1}" aria-current="${i === 0}" aria-label="Show photo ${i + 1}"><img src="${esc(p.url)}" alt=""></button>`).join('')}</div>` : ''}
             </div>
-            <div class="row" style="margin-top:16px">${l.verified ? verifiedPill : ''} ${typePills(l)} <span class="pill">${esc(t(l.land_type))}</span></div>
+            <div class="row" style="margin-top:16px">${levelPill(l)} ${l.site_check && l.site_check.passed ? sitePill : ''} ${typePills(l)} <span class="pill">${esc(t(l.land_type))}</span></div>
             <h1 style="margin-top:8px">${esc(l.title)}</h1>
             <p class="muted">${esc(place(l))}</p>
             <div class="facts">
@@ -349,6 +358,7 @@
               <div class="fact"><div class="k">Duration</div><div class="v">${esc(dur)}</div></div>
               <div class="fact"><div class="k">Available from</div><div class="v">${esc(l.available_from || 'Now')}</div></div>
             </div>
+            ${verificationBox(l)}
             <h2>${esc(t('description'))}</h2>
             <p style="white-space:pre-wrap">${esc(l.description) || '<span class="muted">No description.</span>'}</p>
             ${l.permitted_uses.length ? `<h2>${esc(t('permitted'))}</h2><div class="tags">${l.permitted_uses.map((x) => `<span class="tag">✓ ${esc(x)}</span>`).join('')}</div>` : ''}
@@ -408,6 +418,17 @@
       submit: t('send'),
       onSubmit: async (fd) => { const r = await api('/messages', { method: 'POST', body: { listing_id: l.id, body: fd.get('body') } }); location.hash = `#/inbox/${r.thread_id}`; },
     }));
+    const siteBtn = $('#siteBtn');
+    if (siteBtn) siteBtn.addEventListener('click', () => siteCheckDialog(l));
+    const levelForm = $('#levelForm');
+    if (levelForm) levelForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(levelForm);
+      try {
+        const r = await api(`/admin/listings/${l.id}/level`, { method: 'POST', body: Object.fromEntries(fd) });
+        toast(`Level set: ${r.label}`); route();
+      } catch (err) { $('#levelErr').textContent = err.message; }
+    });
     const reportBtn = $('#reportBtn');
     if (reportBtn) reportBtn.addEventListener('click', () => formDialog({
       title: t('report'),
@@ -453,6 +474,82 @@
         }
       },
     });
+  }
+
+  // ---------- verification ----------
+  const siteCheckSummary = (sc) => {
+    if (!sc) return '<span class="muted">not done</span>';
+    const when = sc.at ? ` · ${esc(new Date(sc.at.replace(' ', 'T') + 'Z').toLocaleDateString())}` : '';
+    if (sc.distance_m === undefined) return `<strong>✓ passed</strong>${when}`; // public view
+    const detail = `${sc.distance_m} m from pin, GPS ±${sc.accuracy_m} m${when}`;
+    return `${sc.passed ? '<strong>✓ passed</strong>' : '<span class="error">✕ not passed</span>'} (${esc(detail)})`
+      + (sc.photo_url ? ` · <a href="${esc(sc.photo_url)}" target="_blank" rel="noopener">photo</a>` : '');
+  };
+
+  function verificationBox(l) {
+    const u = state.user;
+    const isAdmin = u && u.role === 'admin';
+    const level = l.verification_level || 0;
+    const steps = [
+      ['Documents checked', 'Title deed and owner ID reviewed by LandLink'],
+      ['Title search confirmed', 'Official search (Ardhisasa / NLA / Irembo) confirms the owner'],
+      ['Site visit confirmed', 'A LandLink agent visited the land'],
+    ];
+    return `
+      <section class="card pad verify-box" aria-label="Verification">
+        <h2>Verification</h2>
+        <ol class="ladder">${steps.map(([name, desc], i) => `
+          <li class="${level > i ? 'done' : ''}"><span class="tick" aria-hidden="true">${level > i ? '✓' : i + 1}</span>
+            <div><strong>${esc(name)}</strong>${level > i ? '' : ' <span class="muted small">(not yet)</span>'}<div class="small muted">${esc(desc)}</div></div></li>`).join('')}
+        </ol>
+        <p class="small">📍 Owner on-site photo check: ${siteCheckSummary(l.site_check)}</p>
+        ${l.is_owner && l.lat != null ? '<button class="btn small" id="siteBtn" type="button">📍 Do the on-site check</button> <span class="hint">Stand on the land with your phone.</span>' : ''}
+        ${isAdmin && ['verified', 'paused'].includes(l.status) ? `
+          <form id="levelForm" class="admin-level">
+            <h3>Set verification level (admin)</h3>
+            <div class="grid3">
+              <div class="field"><label for="lv_level">Level</label><select id="lv_level" name="level">
+                ${[1, 2, 3].map((n) => `<option value="${n}" ${n === Math.max(level, 1) ? 'selected' : ''}>${n}: ${esc(steps[n - 1][0])}</option>`).join('')}</select></div>
+              <div class="field"><label for="lv_ref">Title search reference</label><input id="lv_ref" name="title_search_ref" maxlength="200" value="${esc(l.title_search_ref || '')}" placeholder="needed for level 2+"></div>
+              <div class="field"><label for="lv_note">Site visit note</label><input id="lv_note" name="site_visit_note" maxlength="1000" value="${esc(l.site_visit_note || '')}" placeholder="who, when, what was checked (level 3)"></div>
+            </div>
+            <p class="error" role="alert" id="levelErr"></p>
+            <button class="btn small primary" type="submit">Save level</button>
+          </form>` : ''}
+      </section>`;
+  }
+
+  // Camera photo + live GPS fix, taken on the land. The best (most accurate) fix is sent.
+  function siteCheckDialog(l) {
+    if (!navigator.geolocation) return toast('This device can\'t share its location.');
+    let best = null;
+    formDialog({
+      title: 'On-site check',
+      fields: `
+        <p class="small">Stand on <strong>${esc(l.title)}</strong>, then take a photo of the land. Your phone's GPS position is recorded with the photo and compared with the map pin (it must be within 300 m).</p>
+        <p class="notice small" id="gpsLive">Waiting for GPS… go outside for a better signal.</p>
+        <div class="field"><label for="sc_photo">Photo of the land</label>
+          <input id="sc_photo" name="photo" type="file" accept="image/*" capture="environment" required></div>`,
+      submit: 'Submit check',
+      onSubmit: async (fd) => {
+        if (!best) throw new Error('No GPS position yet. Wait for the GPS line above to show your accuracy.');
+        if (!fd.get('photo') || !fd.get('photo').size) throw new Error('Take a photo of the land first.');
+        fd.append('lat', best.latitude); fd.append('lng', best.longitude); fd.append('accuracy', best.accuracy);
+        const r = await api(`/listings/${l.id}/site-check`, { method: 'POST', body: fd });
+        toast(r.message);
+        route();
+      },
+    });
+    const live = $('#gpsLive');
+    const watch = navigator.geolocation.watchPosition(
+      (p) => {
+        if (!best || p.coords.accuracy < best.accuracy) best = p.coords;
+        live.textContent = `GPS ready: accurate to about ${Math.round(best.accuracy)} m${best.accuracy > 100 ? ' (needs under 100 m; keep waiting outside)' : ''}.`;
+      },
+      () => { live.textContent = 'Couldn\'t get your location. Allow location access for this site and try again.'; },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 60000 },
+    );
+    $('#dialog').addEventListener('close', () => navigator.geolocation.clearWatch(watch), { once: true });
   }
 
   // ---------- auth ----------
@@ -525,7 +622,7 @@
             <div class="card mine-item" data-id="${l.id}">
               ${l.photos[0] ? `<img src="${esc(l.photos[0].url)}" alt="">` : '<div class="noimg"></div>'}
               <div>
-                <div class="row" style="gap:6px">${statusPill(l.status)}${l.duplicate_deed ? '<span class="pill rejected">Duplicate deed number</span>' : ''}</div>
+                <div class="row" style="gap:6px">${statusPill(l.status)} ${levelPill(l)} ${l.site_check && l.site_check.passed ? sitePill : ''}${l.duplicate_deed ? '<span class="pill rejected">Duplicate deed number</span>' : ''}</div>
                 <h3 style="margin:4px 0"><a href="#/listing/${l.id}">${esc(l.title)}</a></h3>
                 <div class="small">${esc(priceText(l))} · ${esc(sizeText(l))}</div>
                 ${l.reject_reason ? `<div class="small error">Rejected: ${esc(l.reject_reason)}</div>` : ''}
@@ -534,6 +631,7 @@
               <div class="row actions">
                 <a class="btn small" href="#/edit/${l.id}">${esc(t('edit'))}</a>
                 ${['draft', 'rejected'].includes(l.status) ? `<button class="btn small primary" data-act="submit">${esc(t('submit_review'))}</button>` : ''}
+                ${l.lat != null ? `<button class="btn small" data-act="site">📍 ${l.site_check && l.site_check.passed ? 'Redo on-site check' : 'On-site check'}</button>` : ''}
                 ${l.status === 'verified' ? `<button class="btn small" data-act="pause">${esc(t('pause'))}</button>` : ''}
                 ${l.status === 'paused' ? `<button class="btn small" data-act="resume">${esc(t('resume'))}</button>` : ''}
                 <button class="btn small danger" data-act="delete">${esc(t('delete'))}</button>
@@ -544,6 +642,7 @@
     $('.mine').addEventListener('click', async (e) => {
       const b = e.target.closest('button[data-act]'); if (!b) return;
       const id = b.closest('[data-id]').dataset.id; const act = b.dataset.act;
+      if (act === 'site') return siteCheckDialog(results.find((x) => String(x.id) === id));
       if (act === 'delete') {
         return formDialog({ title: 'Delete listing?', fields: '<p>This permanently removes the listing, its photos and documents. This can\'t be undone.</p>', submit: 'Delete', onSubmit: async () => { await api(`/listings/${id}`, { method: 'DELETE' }); toast('Listing deleted.'); route(); } });
       }
@@ -757,7 +856,7 @@
     const { results } = await api('/listings/saved');
     main.innerHTML = `<div class="page"><h1>${esc(t('saved'))}</h1>
       <div class="mine">${results.length ? results.map((l) => `
-        <a class="card lcard" href="#/listing/${l.id}">${coverImg(l)}<div><div class="row">${verifiedPill} ${typePills(l)}</div><h3>${esc(l.title)}</h3><div class="price">${esc(priceText(l))}</div><div class="meta">${esc(sizeText(l))} · ${esc(place(l))}</div></div></a>`).join('')
+        <a class="card lcard" href="#/listing/${l.id}">${coverImg(l)}<div><div class="row">${levelPill(l)} ${typePills(l)}</div><h3>${esc(l.title)}</h3><div class="price">${esc(priceText(l))}</div><div class="meta">${esc(sizeText(l))} · ${esc(place(l))}</div></div></a>`).join('')
     : `<div class="card">${empty(t('empty_saved'), 'Tap ♡ Save on a listing to keep it here.')}</div>`}</div></div>`;
   }
 
@@ -871,6 +970,7 @@
             <div><h2 style="margin:0"><a href="#/listing/${l.id}">${esc(l.title)}</a></h2>
               <div class="small muted">${esc(l.owner_name)} (${esc(l.owner_email)}) · ${esc(place(l))} · ${esc(priceText(l))} · ${esc(sizeText(l))}</div>
               <div class="small">Deed no.: <strong>${esc(l.deed_number || 'not given')}</strong> ${l.duplicate_deed ? '<span class="pill rejected">⚠ Duplicate deed number</span>' : ''}</div>
+              <div class="small">On-site check: ${siteCheckSummary(l.site_check)}</div>
               ${l.deed_conflicts.length ? `<div class="small error">Same deed number used by: ${l.deed_conflicts.map((c) => `<a href="#/listing/${c.id}">#${c.id} ${esc(c.title)}</a> (${esc(c.status)})`).join(', ')}</div>` : ''}
             </div>
             <div class="row"><button class="btn primary" data-act="approve">Approve</button><button class="btn danger" data-act="reject">Reject</button></div>

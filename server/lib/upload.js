@@ -47,6 +47,23 @@ function handleListingUpload(req, res, next) {
   });
 }
 
+// One camera photo for the on-site check. Phone photos run large, so allow 10MB.
+const sitePhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * MB, files: 1, fields: 10 },
+  fileFilter: (_req, file, cb) => cb(IMAGE_TYPES[file.mimetype] ? null : new Error('The photo must be JPG, PNG or WebP.'), !!IMAGE_TYPES[file.mimetype]),
+}).single('photo');
+
+function handleSitePhoto(req, res, next) {
+  sitePhotoUpload(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'The photo must be 10MB or smaller.' : err.message });
+    if (!req.file) return res.status(400).json({ error: 'Take a photo of the land first.' });
+    if (!sniff(req.file)) return res.status(400).json({ error: 'That file is not a valid image.' });
+    req.file.filename = crypto.randomBytes(16).toString('hex') + IMAGE_TYPES[req.file.mimetype];
+    next();
+  });
+}
+
 async function storeFiles(files) {
   const all = Object.values(files || {}).flat();
   await Promise.all(all.map((f) => storage.put(bucketFor(f), f.filename, f.buffer, f.mimetype)));
@@ -55,4 +72,4 @@ async function discardFiles(files) {
   await Promise.all(Object.values(files || {}).flat().map((f) => storage.remove(bucketFor(f), f.filename)));
 }
 
-module.exports = { handleListingUpload, storeFiles, discardFiles };
+module.exports = { handleListingUpload, handleSitePhoto, storeFiles, discardFiles };

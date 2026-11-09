@@ -139,8 +139,31 @@ CREATE TABLE IF NOT EXISTS reports (
   reason TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved')),
   created_at ${ts}
-);`;
+);
+
+-- Owner's on-site GPS photo: where the phone was when the photo was taken.
+CREATE TABLE IF NOT EXISTS site_checks (
+  id ${id},
+  listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  photo TEXT NOT NULL,                   -- private object name
+  lat ${real} NOT NULL,
+  lng ${real} NOT NULL,
+  accuracy_m ${real} NOT NULL,
+  created_at ${ts}
+);
+CREATE INDEX IF NOT EXISTS idx_site_checks_listing ON site_checks(listing_id);`;
 }
+
+// Columns added after the first release. Each entry is added if missing, on both backends.
+const ADDED_COLUMNS = [
+  // 0 = not verified, 1 = documents checked, 2 = title search confirmed, 3 = site visit confirmed
+  ['listings', 'verification_level', 'INTEGER NOT NULL DEFAULT 0'],
+  ['listings', 'title_search_ref', 'TEXT'],
+  ['listings', 'site_visit_note', 'TEXT'],
+];
+// Listings verified before levels existed count as level 1 (documents checked).
+const BACKFILL = "UPDATE listings SET verification_level = 1 WHERE status IN ('verified','paused') AND verification_level = 0";
 
 function pgBackend() {
   const { Pool, types } = require('pg');
@@ -178,9 +201,13 @@ function pgBackend() {
     },
     // Supabase exposes the public schema over its REST API with a non-secret anon key.
     // RLS with no policies blocks that API entirely; the app connects as the table owner, which bypasses RLS.
-    init: () => pool.query(`${schema(true)}
-      ${['users', 'listings', 'photos', 'saves', 'threads', 'offers', 'messages', 'notifications', 'reports']
-    .map((t) => `ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;`).join('\n')}`),
+    init: async () => {
+      await pool.query(schema(true));
+      for (const [t, col, type] of ADDED_COLUMNS) await pool.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS ${col} ${type}`);
+      await pool.query(BACKFILL);
+      await pool.query(['users', 'listings', 'photos', 'saves', 'threads', 'offers', 'messages', 'notifications', 'reports', 'site_checks']
+        .map((t) => `ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;`).join('\n'));
+    },
     close: () => pool.end(),
   };
 }
@@ -214,7 +241,13 @@ function sqliteBackend() {
       chain = run.catch(() => {});
       return run;
     },
-    init: async () => sdb.exec(schema(false)),
+    init: async () => {
+      sdb.exec(schema(false));
+      for (const [t, col, type] of ADDED_COLUMNS) {
+        if (!sdb.prepare(`PRAGMA table_info(${t})`).all().some((c) => c.name === col)) sdb.exec(`ALTER TABLE ${t} ADD COLUMN ${col} ${type}`);
+      }
+      sdb.exec(BACKFILL);
+    },
     close: async () => sdb.close(),
   };
 }

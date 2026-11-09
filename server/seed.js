@@ -111,6 +111,10 @@ async function main() {
       deed_file: await writeFile('private', '.pdf', samplePdf(`TITLE DEED ${l.deed}`), 'application/pdf'),
       id_file: await writeFile('private', '.pdf', samplePdf('NATIONAL ID - DEMO'), 'application/pdf'),
       show_deed: l.show_deed, status: 'verified', created_at: created, updated_at: created,
+      // Demo spread of verification levels: every third listing site-visited, the next title-searched.
+      verification_level: i % 3 === 0 ? 3 : i % 3 === 1 ? 2 : 1,
+      title_search_ref: i % 3 === 2 ? null : `DEMO-SEARCH-${1000 + i}`,
+      site_visit_note: i % 3 === 0 ? 'Demo: agent visit, beacons and access road checked' : null,
     };
     const cols = Object.keys(row);
     const id = await db.insert(`INSERT INTO listings (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`, ...cols.map((c) => row[c]));

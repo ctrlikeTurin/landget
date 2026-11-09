@@ -3,7 +3,7 @@ const db = require('../db');
 const { requireRole } = require('../middleware/auth');
 const notify = require('../lib/notify');
 const v = require('../lib/validate');
-const { serializeFull, getListing } = require('./listings');
+const { serializeFull, getListing, LEVELS } = require('./listings');
 
 const router = express.Router();
 router.use(requireRole('admin'));
@@ -44,9 +44,28 @@ router.post('/listings/:id/approve', async (req, res) => {
   if (l.deed_number && await db.get("SELECT 1 FROM listings WHERE deed_number = ? AND status IN ('verified','paused') AND id != ?", l.deed_number, l.id)) {
     return res.status(409).json({ error: 'Another verified listing already uses this title deed number. Reject one of them.' });
   }
-  await db.run("UPDATE listings SET status = 'verified', reject_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", l.id);
+  // Approval means the documents were checked: level 1. Higher levels are set separately.
+  await db.run("UPDATE listings SET status = 'verified', reject_reason = NULL, verification_level = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", l.id);
   await notify(l.owner_id, 'verification', 'Listing verified', `"${l.title}" is now live.`, `#/listing/${l.id}`);
   res.json({ ok: true });
+});
+
+// Raise (or lower) a verified listing's level. Each level needs its evidence recorded.
+router.post('/listings/:id/level', async (req, res) => {
+  const l = await getListing(req.params.id);
+  if (!l) return res.status(404).json({ error: 'Listing not found.' });
+  if (!['verified', 'paused'].includes(l.status)) return res.status(400).json({ error: 'Approve the listing before setting a higher level.' });
+  const level = v.num(req.body.level, 'Level', { min: 1, max: 3, required: true });
+  if (!Number.isInteger(level)) throw new v.ValidationError('Level must be 1, 2 or 3.');
+  const ref = v.str(req.body.title_search_ref, 'Title search reference', { max: 200 }) || l.title_search_ref;
+  const note = v.str(req.body.site_visit_note, 'Site visit note', { max: 1000 }) || l.site_visit_note;
+  if (level >= 2 && !ref) throw new v.ValidationError('Enter the official title search reference (Ardhisasa / NLA / Irembo) to confirm level 2.');
+  if (level >= 3 && !note) throw new v.ValidationError('Describe the site visit (who visited, when, what was checked) to confirm level 3.');
+  await db.run('UPDATE listings SET verification_level = ?, title_search_ref = ?, site_visit_note = ? WHERE id = ?', level, ref || null, note || null, l.id);
+  if (level > (l.verification_level || 0)) {
+    await notify(l.owner_id, 'verification', `Verification upgraded: ${LEVELS[level]}`, `"${l.title}" now shows "${LEVELS[level]}".`, `#/listing/${l.id}`);
+  }
+  res.json({ ok: true, level, label: LEVELS[level] });
 });
 
 router.post('/listings/:id/reject', async (req, res) => {

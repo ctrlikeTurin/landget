@@ -2,14 +2,30 @@ const express = require('express');
 const db = require('../db');
 const storage = require('../lib/storage');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { handleListingUpload, storeFiles, discardFiles } = require('../lib/upload');
-const { parseQuery, search } = require('../lib/search');
+const { handleListingUpload, handleSitePhoto, storeFiles, discardFiles } = require('../lib/upload');
+const { parseQuery, search, haversineKm } = require('../lib/search');
 const notify = require('../lib/notify');
 const v = require('../lib/validate');
 
 const router = express.Router();
 
 const json = (s, d) => { try { return JSON.parse(s); } catch { return d; } };
+
+// On-site check passes when the phone was this close to the pin, with a usable GPS fix.
+const SITE_RADIUS_M = 300;
+const SITE_MAX_ACCURACY_M = 100;
+const LEVELS = ['Not verified', 'Documents checked', 'Title search confirmed', 'Site visit confirmed'];
+
+// Latest owner site check, judged against the listing's CURRENT pin (moving the pin re-judges it).
+async function siteCheckFor(l) {
+  const c = await db.get('SELECT * FROM site_checks WHERE listing_id = ? ORDER BY id DESC LIMIT 1', l.id);
+  if (!c) return null;
+  const distance = l.lat == null ? null : Math.round(haversineKm(c.lat, c.lng, l.lat, l.lng) * 1000);
+  return {
+    id: c.id, at: c.created_at, distance_m: distance, accuracy_m: Math.round(c.accuracy_m),
+    passed: distance != null && distance <= SITE_RADIUS_M && c.accuracy_m <= SITE_MAX_ACCURACY_M,
+  };
+}
 
 // Card-sized view of a listing; safe for anyone.
 function serialize(l, _viewer) {
@@ -20,6 +36,7 @@ function serialize(l, _viewer) {
     price: l.price, currency: l.currency, price_unit: l.price_unit, negotiable: !!l.negotiable,
     country: l.country, region: l.region, town: l.town, lat: l.lat, lng: l.lng,
     status: l.status, verified: l.status === 'verified',
+    verification_level: l.status === 'verified' ? (l.verification_level || 0) : 0,
     cover: l.cover ? storage.publicUrl(l.cover) : null,
     created_at: l.created_at,
   };
@@ -31,9 +48,10 @@ function serialize(l, _viewer) {
 async function serializeFull(l, viewer) {
   const isOwner = !!(viewer && viewer.id === l.owner_id);
   const isAdmin = !!(viewer && viewer.role === 'admin');
-  const [photos, owner] = await Promise.all([
+  const [photos, owner, site] = await Promise.all([
     db.all('SELECT id, filename FROM photos WHERE listing_id = ? ORDER BY position, id', l.id),
     db.get('SELECT name FROM users WHERE id = ?', l.owner_id),
+    siteCheckFor(l),
   ]);
   const out = {
     ...serialize({ ...l, cover: l.cover || (photos[0] && photos[0].filename) }, viewer),
@@ -46,6 +64,9 @@ async function serializeFull(l, viewer) {
     owner: { name: owner && owner.name },
     show_deed: !!l.show_deed,
     is_owner: isOwner,
+    verification_label: LEVELS[l.status === 'verified' ? (l.verification_level || 0) : 0],
+    // Public: only whether the owner proved they were on the land, and when.
+    site_check: site && site.passed ? { passed: true, at: site.at } : null,
     // Contacts are shown only to logged-in users.
     contacts: viewer ? { phone: l.contact_phone, whatsapp: l.contact_whatsapp, email: l.contact_email } : null,
   };
@@ -61,6 +82,9 @@ async function serializeFull(l, viewer) {
       has_deed: !!l.deed_file, has_id: !!l.id_file,
       reject_reason: l.reject_reason, duplicate_deed: !!l.duplicate_deed,
       views: l.views,
+      title_search_ref: l.title_search_ref, site_visit_note: l.site_visit_note,
+      // Owner/admin see the full result, including failures, and the private photo.
+      site_check: site && { ...site, photo_url: `/api/files/${l.id}/site/${site.id}` },
     });
   }
   return out;
@@ -86,7 +110,8 @@ async function submitForReview(l) {
   if (!l.deed_file || !l.id_file) {
     throw new v.ValidationError('Upload both the title deed and your national ID or passport before submitting for verification.');
   }
-  await db.run("UPDATE listings SET status = 'pending', reject_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", l.id);
+  // Re-review starts the levels over: an edited deed or location needs checking again.
+  await db.run("UPDATE listings SET status = 'pending', reject_reason = NULL, verification_level = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", l.id);
   await flagDuplicateDeeds(l.deed_number);
   for (const a of await db.all("SELECT id FROM users WHERE role = 'admin'")) {
     await notify(a.id, 'review', 'New listing to verify', l.title, '#/admin');
@@ -222,9 +247,11 @@ router.post('/:id/resume', requireRole('lender'), async (req, res) => {
 router.delete('/:id', requireRole('lender', 'admin'), async (req, res) => {
   const l = await ownListing(req, res); if (!l) return;
   const photos = await db.all('SELECT filename FROM photos WHERE listing_id = ?', l.id);
+  const sitePhotos = await db.all('SELECT photo FROM site_checks WHERE listing_id = ?', l.id);
   await db.run('DELETE FROM listings WHERE id = ?', l.id);
   await Promise.all([
     ...photos.map((p) => storage.remove('public', p.filename)),
+    ...sitePhotos.map((p) => storage.remove('private', p.photo)),
     storage.remove('private', l.deed_file),
     storage.remove('private', l.id_file),
   ]);
@@ -239,6 +266,26 @@ router.delete('/:id/photos/:photoId', requireRole('lender'), async (req, res) =>
   await db.run('DELETE FROM photos WHERE id = ?', p.id);
   await storage.remove('public', p.filename);
   res.json({ ok: true });
+});
+
+// Owner's on-site check: photo taken on the land plus the phone's GPS fix at that moment.
+// Browser GPS can be spoofed, so this is evidence for the admin and a badge, not proof on its own.
+router.post('/:id/site-check', requireRole('lender'), handleSitePhoto, async (req, res) => {
+  const l = await ownListing(req, res); if (!l) return;
+  if (l.owner_id !== req.user.id) return res.status(403).json({ error: 'Only the owner can do the on-site check.' });
+  if (l.lat == null) return res.status(400).json({ error: 'Place the land on the map first, then do the on-site check.' });
+  const lat = v.num(req.body.lat, 'Latitude', { min: -90, max: 90, required: true });
+  const lng = v.num(req.body.lng, 'Longitude', { min: -180, max: 180, required: true });
+  const accuracy = v.num(req.body.accuracy, 'GPS accuracy', { min: 0, max: 100000, required: true });
+  await storage.put('private', req.file.filename, req.file.buffer, req.file.mimetype);
+  await db.insert('INSERT INTO site_checks (listing_id, user_id, photo, lat, lng, accuracy_m) VALUES (?, ?, ?, ?, ?, ?)',
+    l.id, req.user.id, req.file.filename, lat, lng, accuracy);
+  const site = await siteCheckFor(l);
+  let message;
+  if (site.passed) message = `On-site check passed: you were ${site.distance_m} m from the pin.`;
+  else if (accuracy > SITE_MAX_ACCURACY_M) message = `Your GPS was too imprecise (±${Math.round(accuracy)} m). Go outside, wait a minute for a better signal, and try again.`;
+  else message = `You were ${site.distance_m} m from the pin; it must be within ${SITE_RADIUS_M} m. Stand on the land, or fix the pin, and try again.`;
+  res.status(201).json({ site_check: site, message });
 });
 
 // ---- Detail, saves, reports ----
@@ -276,4 +323,4 @@ router.post('/:id/report', requireAuth, async (req, res) => {
   res.status(201).json({ ok: true });
 });
 
-module.exports = { router, serialize, serializeFull, getListing };
+module.exports = { router, serialize, serializeFull, getListing, LEVELS };

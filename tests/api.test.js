@@ -186,3 +186,53 @@ describe('negotiation + chat', () => {
     assert.match(k.body.reply, /Ardhisasa/);
   });
 });
+
+describe('on-site GPS check + verification levels', () => {
+  const siteCheck = (a, lat, lng, accuracy) => a.post(`/api/listings/${listingId}/site-check`)
+    .field('lat', String(lat)).field('lng', String(lng)).field('accuracy', String(accuracy))
+    .attach('photo', PNG, { filename: 'site.png', contentType: 'image/png' });
+
+  test('approval sets level 1 (documents checked)', async () => {
+    const r = await customer.get(`/api/listings/${listingId}`).expect(200);
+    assert.equal(r.body.listing.verification_level, 1);
+    assert.equal(r.body.listing.verification_label, 'Documents checked');
+  });
+  test('only the owner can do the on-site check', async () => {
+    await siteCheck(customer, 0.52, 35.27, 10).expect(403);
+  });
+  test('a check far from the pin fails and stays private', async () => {
+    const r = await siteCheck(lender, 0.60, 35.27, 10).expect(201); // ~9 km away
+    assert.equal(r.body.site_check.passed, false);
+    assert.equal((await customer.get(`/api/listings/${listingId}`)).body.listing.site_check, null);
+  });
+  test('an imprecise GPS fix fails even at the right spot', async () => {
+    const r = await siteCheck(lender, 0.52, 35.27, 500).expect(201);
+    assert.equal(r.body.site_check.passed, false);
+    assert.match(r.body.message, /imprecise/);
+  });
+  test('a precise check on the land passes and shows a public badge', async () => {
+    const r = await siteCheck(lender, 0.5205, 35.2703, 15).expect(201); // ~65 m from the pin
+    assert.equal(r.body.site_check.passed, true);
+    const pub = (await customer.get(`/api/listings/${listingId}`)).body.listing;
+    assert.equal(pub.site_check.passed, true);
+    assert.equal(pub.site_check.distance_m, undefined); // details are owner/admin only
+    assert.equal(pub.site_check.photo_url, undefined);
+    const own = (await lender.get(`/api/listings/${listingId}`)).body.listing;
+    await customer.get(own.site_check.photo_url).expect(404);
+    await request(app).get(own.site_check.photo_url).expect(404);
+    await admin.get(own.site_check.photo_url).expect(200);
+    await lender.get(own.site_check.photo_url).expect(200);
+  });
+  test('only admins raise levels, and each level needs evidence', async () => {
+    await lender.post(`/api/admin/listings/${listingId}/level`).send({ level: 2, title_search_ref: 'X' }).expect(403);
+    await admin.post(`/api/admin/listings/${listingId}/level`).send({ level: 2 }).expect(400);
+    await admin.post(`/api/admin/listings/${listingId}/level`).send({ level: 2, title_search_ref: 'ARDHISASA-SRCH-123' }).expect(200);
+    await admin.post(`/api/admin/listings/${listingId}/level`).send({ level: 3 }).expect(400);
+    await admin.post(`/api/admin/listings/${listingId}/level`).send({ level: 3, site_visit_note: 'Agent visited, beacons match' }).expect(200);
+    const pub = (await customer.get(`/api/listings/${listingId}`)).body.listing;
+    assert.equal(pub.verification_level, 3);
+    assert.equal(pub.title_search_ref, undefined); // the reference stays internal
+    const card = (await request(app).get('/api/listings').query({ q: 'Eldoret' })).body.results[0];
+    assert.equal(card.verification_level, 3);
+  });
+});

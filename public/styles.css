@@ -267,3 +267,15 @@ th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--bor
 @keyframes blink { 50% { opacity: .2; } }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* ---- verification ---- */
+.pill.level-2 { background: color-mix(in srgb, var(--brand) 26%, transparent); }
+.pill.level-3 { background: var(--brand); color: #fff; }
+.pill.site { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.verify-box { margin: 16px 0; }
+.ladder { list-style: none; padding: 0; margin: 0 0 8px; display: grid; gap: 10px; }
+.ladder li { display: flex; gap: 10px; align-items: flex-start; opacity: .75; }
+.ladder li.done { opacity: 1; }
+.ladder .tick { flex: 0 0 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: .8rem; font-weight: 700; background: var(--surface-2); color: var(--muted); }
+.ladder li.done .tick { background: var(--brand); color: #fff; }
+.admin-level { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 12px; }
