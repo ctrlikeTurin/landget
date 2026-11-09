@@ -9,6 +9,9 @@ const v = require('../lib/validate');
 
 const router = express.Router();
 
+// Surfaced on /api/health so a misconfigured key or retired model is visible without server logs.
+const status = { lastError: null };
+
 const MODELS = (process.env.OPENROUTER_MODEL || 'google/gemma-4-31b-it:free,nvidia/nemotron-3.5-lightning:free').split(',').map((s) => s.trim()).filter(Boolean);
 
 const DISCLAIMER = 'Always visit the land in person, confirm the title at the land registry, and have a lawyer review any agreement before you pay or sign.';
@@ -133,8 +136,10 @@ router.post('/', async (req, res) => {
     try {
       reply = await askModel(history, msg, results, searched, found.relaxed);
       source = 'ai';
+      status.lastError = null;
     } catch (e) {
       console.warn('[chat] model failed, using rule-based reply:', e.message);
+      status.lastError = { at: new Date().toISOString(), message: e.message.slice(0, 200) };
     }
   }
   if (!reply) reply = ruleBased(msg.toLowerCase(), results, searched, found.relaxed);
@@ -144,3 +149,8 @@ router.post('/', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.aiStatus = () => ({
+  ai: process.env.OPENROUTER_API_KEY ? 'configured' : 'off',
+  models: MODELS,
+  ai_last_error: status.lastError,
+});

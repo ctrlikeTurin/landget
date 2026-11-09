@@ -66,7 +66,7 @@ app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/files', require('./routes/files'));
 app.get('/api/health', async (_req, res) => {
   await db.get('SELECT 1 AS ok');
-  res.json({ ok: true, db: db.kind, storage: storage.kind });
+  res.json({ ok: true, db: db.kind, storage: storage.kind, ...require('./routes/chat').aiStatus() });
 });
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
 
