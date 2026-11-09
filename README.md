@@ -38,7 +38,7 @@ Change `ADMIN_PASSWORD` before deploying. Keep it quoted in `.env`, because `#` 
 
 ## The AI assistant
 
-Set `OPENROUTER_API_KEY` in `.env` (get a free key at openrouter.ai). `OPENROUTER_MODEL` defaults to `meta-llama/llama-3.3-70b-instruct:free`.
+Set `OPENROUTER_API_KEY` in `.env` (get a free key at openrouter.ai). `OPENROUTER_MODEL` is a comma-separated fallback list, defaulting to `google/gemma-4-31b-it:free,nvidia/nemotron-3.5-lightning:free`. Free models get retired; check https://openrouter.ai/models?q=free and update the list if the assistant drops to basic mode.
 
 How it works, and why it can't invent listings:
 1. The server extracts search intent from the message (land type, size, budget, place, lease/sale/partnership) with the same parser that powers the search bar.

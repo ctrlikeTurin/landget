@@ -9,6 +9,8 @@ const v = require('../lib/validate');
 
 const router = express.Router();
 
+const MODELS = (process.env.OPENROUTER_MODEL || 'google/gemma-4-31b-it:free,nvidia/nemotron-3.5-lightning:free').split(',').map((s) => s.trim()).filter(Boolean);
+
 const DISCLAIMER = 'Always visit the land in person, confirm the title at the land registry, and have a lawyer review any agreement before you pay or sign.';
 
 router.use(rateLimit({
@@ -98,7 +100,8 @@ async function askModel(history, msg, results, searched, relaxed) {
       'X-Title': 'LandLink',
     },
     body: JSON.stringify({
-      model: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
+      // A comma list becomes OpenRouter's fallback chain: if the first model is busy or retired, it tries the next.
+      models: MODELS,
       messages: [{ role: 'system', content: system }, ...history, { role: 'user', content: msg }],
       temperature: 0.3,
       max_tokens: 500,

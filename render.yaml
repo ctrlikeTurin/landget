@@ -29,6 +29,6 @@ services:
       - key: OPENROUTER_API_KEY    # optional; leave empty for the rule-based assistant
         sync: false
       - key: OPENROUTER_MODEL
-        value: meta-llama/llama-3.3-70b-instruct:free
+        value: google/gemma-4-31b-it:free,nvidia/nemotron-3.5-lightning:free
       - key: APP_URL
         sync: false
