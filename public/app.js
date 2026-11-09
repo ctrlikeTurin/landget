@@ -609,6 +609,8 @@
             <div class="field"><label for="i_addr">Find on map</label>
               <div class="row" style="flex-wrap:nowrap"><input id="i_addr" placeholder="Search an address or place"><button class="btn" type="button" id="addrBtn">Find</button></div>
               <span class="hint">Or click on the map to drop the pin at the exact spot.</span></div>
+            <p><button class="btn" type="button" id="gpsBtn">📍 Use my current location</button>
+              <span class="hint" id="gpsHint">Standing on the land? Use your phone's GPS for the most accurate pin.</span></p>
             <div id="pickMap" class="pick-map" aria-label="Map: click to place the pin"></div>
             <p class="small muted" id="latlng">${l && l.lat != null ? `Pin: ${l.lat.toFixed(5)}, ${l.lng.toFixed(5)}` : 'No pin placed yet.'}</p>
             <input type="hidden" name="lat" value="${val('lat')}"><input type="hidden" name="lng" value="${val('lng')}">
@@ -683,6 +685,23 @@
       } catch { toast('Address search is unavailable. Click on the map instead.'); } finally { $('#addrBtn').disabled = false; }
     }
     $('#addrBtn').addEventListener('click', geocode);
+    $('#gpsBtn').addEventListener('click', () => {
+      if (!navigator.geolocation) return toast('Location is not available on this device.');
+      $('#gpsBtn').disabled = true;
+      $('#gpsHint').textContent = 'Getting your location…';
+      navigator.geolocation.getCurrentPosition(
+        (p) => {
+          $('#gpsBtn').disabled = false;
+          setPin(p.coords.latitude, p.coords.longitude, 17);
+          $('#gpsHint').textContent = `Pinned from GPS (accurate to about ${Math.round(p.coords.accuracy)} m). Drag the pin to adjust.`;
+        },
+        () => {
+          $('#gpsBtn').disabled = false;
+          $('#gpsHint').textContent = 'Couldn\'t get your location. Allow location access, or click on the map instead.';
+        },
+        { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 },
+      );
+    });
     $('#i_addr').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); geocode(); } });
 
     const strip = $('#photoStrip');
