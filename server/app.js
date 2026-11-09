@@ -27,6 +27,8 @@ app.use(helmet({
     },
   },
   crossOriginEmbedderPolicy: false,
+  // OpenStreetMap's tile servers reject requests without a Referer; send just our origin.
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
 }));
 app.use(express.json({ limit: '200kb' }));
 app.use(express.urlencoded({ extended: false, limit: '200kb' }));
