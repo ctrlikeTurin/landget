@@ -2,6 +2,7 @@ require('dotenv').config({ quiet: true });
 const path = require('path');
 const express = require('express');
 const helmet = require('helmet');
+const compression = require('compression');
 const cookieParser = require('cookie-parser');
 const { rateLimit } = require('express-rate-limit');
 const { loadUser } = require('./middleware/auth');
@@ -30,6 +31,7 @@ app.use(helmet({
   // OpenStreetMap's tile servers reject requests without a Referer; send just our origin.
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
 }));
+app.use(compression());
 app.use(express.json({ limit: '200kb' }));
 app.use(express.urlencoded({ extended: false, limit: '200kb' }));
 app.use((req, _res, next) => { if (!req.body) req.body = {}; next(); }); // Express 5 leaves it undefined
@@ -64,7 +66,10 @@ app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
 // Local storage only: listing photos are public; uploads/private has no static route at all.
 // With Supabase, photos are served from the public bucket's own URL.
 if (storage.publicDir) app.use('/uploads', express.static(storage.publicDir, { maxAge: '7d', index: false }));
-app.use(express.static(path.join(__dirname, '..', 'public')));
+// index.html must always revalidate so new deploys show up; JS/CSS can be cached for an hour.
+app.use(express.static(path.join(__dirname, '..', 'public'), {
+  setHeaders: (res, file) => res.set('Cache-Control', file.endsWith('.html') ? 'no-cache' : 'public, max-age=3600'),
+}));
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, _req, res, _next) => {

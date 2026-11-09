@@ -31,8 +31,10 @@ function serialize(l, _viewer) {
 async function serializeFull(l, viewer) {
   const isOwner = !!(viewer && viewer.id === l.owner_id);
   const isAdmin = !!(viewer && viewer.role === 'admin');
-  const photos = await db.all('SELECT id, filename FROM photos WHERE listing_id = ? ORDER BY position, id', l.id);
-  const owner = await db.get('SELECT name FROM users WHERE id = ?', l.owner_id);
+  const [photos, owner] = await Promise.all([
+    db.all('SELECT id, filename FROM photos WHERE listing_id = ? ORDER BY position, id', l.id),
+    db.get('SELECT name FROM users WHERE id = ?', l.owner_id),
+  ]);
   const out = {
     ...serialize({ ...l, cover: l.cover || (photos[0] && photos[0].filename) }, viewer),
     description: l.description,
@@ -245,9 +247,12 @@ router.get('/:id', async (req, res) => {
   const l = await getListing(req.params.id);
   const canSeeUnpublished = req.user && l && (req.user.id === l.owner_id || req.user.role === 'admin');
   if (!l || (l.status !== 'verified' && !canSeeUnpublished)) return res.status(404).json({ error: 'Listing not found.' });
-  if (!req.user || req.user.id !== l.owner_id) await db.run('UPDATE listings SET views = views + 1 WHERE id = ?', l.id);
-  const out = await serializeFull(l, req.user);
-  out.saved = !!(req.user && await db.get('SELECT 1 FROM saves WHERE user_id = ? AND listing_id = ?', req.user.id, l.id));
+  const [, out, saved] = await Promise.all([
+    !req.user || req.user.id !== l.owner_id ? db.run('UPDATE listings SET views = views + 1 WHERE id = ?', l.id) : null,
+    serializeFull(l, req.user),
+    req.user ? db.get('SELECT 1 FROM saves WHERE user_id = ? AND listing_id = ?', req.user.id, l.id) : null,
+  ]);
+  out.saved = !!saved;
   res.json({ listing: out });
 });
 
