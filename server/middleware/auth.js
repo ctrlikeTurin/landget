@@ -22,14 +22,17 @@ function issue(res, user) {
 }
 
 // Attaches req.user when a valid cookie is present; never rejects.
-function loadUser(req, _res, next) {
+async function loadUser(req, _res, next) {
   const token = req.cookies && req.cookies[COOKIE];
   if (token) {
-    try {
-      const { id } = jwt.verify(token, secret());
-      const u = db.prepare('SELECT id, name, email, phone, role, suspended FROM users WHERE id = ?').get(id);
-      if (u && !u.suspended) req.user = u;
-    } catch { /* invalid or expired token: treat as anonymous */ }
+    let id;
+    try { ({ id } = jwt.verify(token, secret())); } catch { /* invalid or expired token: treat as anonymous */ }
+    if (id) {
+      try {
+        const u = await db.get('SELECT id, name, email, phone, role, suspended FROM users WHERE id = ?', id);
+        if (u && !u.suspended) req.user = u;
+      } catch (e) { return next(e); }
+    }
   }
   next();
 }

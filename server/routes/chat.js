@@ -47,11 +47,11 @@ function wantsSearch(msg, parsed) {
 
 // Every free-text word must match, which is strict. If nothing matches, try each word
 // as a place name ("cheap plot Nakuru" → Nakuru), but never drop the place entirely.
-function runSearch(parsed) {
-  const r = search(parsed, { limit: 6 });
+async function runSearch(parsed) {
+  const r = await search(parsed, { limit: 6 });
   if (r.total || !parsed.text) return r;
   for (const w of parsed.text.split(' ')) {
-    const alt = search({ ...parsed, text: undefined, region: w }, { limit: 6 });
+    const alt = await search({ ...parsed, text: undefined, region: w }, { limit: 6 });
     if (alt.total) return { ...alt, relaxed: true };
   }
   return r;
@@ -122,7 +122,7 @@ router.post('/', async (req, res) => {
 
   const parsed = parseQuery(msg);
   const searched = wantsSearch(msg.toLowerCase(), parsed);
-  const found = searched ? runSearch(parsed) : { rows: [] };
+  const found = searched ? await runSearch(parsed) : { rows: [] };
   const results = found.rows;
 
   let reply; let source = 'rules';

@@ -2,7 +2,7 @@
 
 A marketplace where landowners list land for **lease, sale or partnership** and customers search, view and negotiate for it. It is built for Kenya and Rwanda and works mobile-first, so it can be wrapped as a mobile app later (Capacitor, or a PWA wrapper).
 
-- **Backend:** Node.js + Express 5, SQLite (better-sqlite3), bcryptjs, JWT in an httpOnly cookie, multer, helmet, express-rate-limit
+- **Backend:** Node.js + Express 5, PostgreSQL/Supabase in production or SQLite locally (better-sqlite3), bcryptjs, JWT in an httpOnly cookie, multer, helmet, express-rate-limit
 - **Frontend:** plain HTML/CSS/JS single-page app (no build step), Leaflet + OpenStreetMap, Esri World Imagery satellite toggle, marker clustering
 - **Assistant:** server-side proxy to OpenRouter (free model), with a rule-based fallback when no key is set
 
@@ -98,28 +98,37 @@ uploads/public|private
 
 UI strings live in `public/i18n.js`. Add `sw` (Swahili) and `rw` (Kinyarwanda) objects with the same keys; any missing key falls back to English. The language comes from `localStorage.ll_lang`, so a language picker only needs to set that and reload.
 
-## Deploying for free
+## Deploying for free (Render + Supabase)
 
-The app is one Node process with a SQLite file and an uploads folder, so it needs **persistent disk**.
+The app picks its backends from the environment:
 
-### Render
-1. Push the repo to GitHub. `.env`, the DB and `uploads/private` are already git-ignored.
-2. In Render, choose **New → Web Service**, then pick the repo.
-   - Build command: `npm install`
-   - Start command: `npm run seed && npm start` for the first deploy only, then change it to `npm start`
-3. Set the environment variables `NODE_ENV=production`, `JWT_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and optionally `OPENROUTER_API_KEY` and `APP_URL=https://<your-app>.onrender.com`.
-4. **Persistence:** Render's free instances have an ephemeral disk, so the DB and uploads reset on every deploy or restart. Fine for a demo. For real use, add a Render Disk (paid) mounted at `/var/data`, then set `DB_PATH=/var/data/landlink.db` and `UPLOAD_DIR=/var/data/uploads`.
+| Setting | Unset (local dev, tests) | Set (production) |
+|---|---|---|
+| `DATABASE_URL` | SQLite file at `DB_PATH` | Supabase Postgres |
+| `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` | `./uploads` on disk | Supabase Storage |
 
-### Railway
-1. Create a **New Project** and deploy from the GitHub repo. It detects Node and runs `npm start`.
-2. Add the same variables.
-3. Add a **Volume** mounted at `/data` and set `DB_PATH=/data/landlink.db` and `UPLOAD_DIR=/data/uploads`. Volumes persist across deploys.
-4. Run the seed once from the Railway shell: `npm run seed`.
+Tests always use SQLite and local disk, even if `.env` has Supabase values.
+
+### 1. Supabase (database + file storage)
+1. Create a project at supabase.com (free tier, no card). Pick a region near your users, e.g. Frankfurt or Mumbai. Save the database password.
+2. Go to **Project Settings → Database → Connection string → Transaction pooler** (port **6543**) and copy the URI. Replace `[YOUR-PASSWORD]` with your password, URL-encoding special characters (`#` → `%23`, `@` → `%40`). This is `DATABASE_URL`. Use the pooler URI, not the "direct" one: Render's free tier only has IPv4, and Supabase's direct host is IPv6-only.
+3. Go to **Project Settings → API**: the **Project URL** is `SUPABASE_URL`, and the **service_role** secret is `SUPABASE_SERVICE_ROLE_KEY`. The service role key bypasses all security, so keep it on the server only.
+4. Nothing else to configure. On first start the app creates the tables, turns on Row Level Security (which blocks Supabase's public REST API from reading them), and creates two buckets: `landlink-public` for photos and `landlink-private` for deeds and IDs.
+5. Seed it once from your machine: put the three values in `.env` and run `npm run seed`. **This wipes all data in that project.**
+
+### 2. Render (web app)
+1. In Render, choose **New → Blueprint** and pick this GitHub repo. It reads `render.yaml`: free web service, `npm ci`, `npm start`, and a health check on `/api/health`.
+2. Fill in the secret variables it asks for: `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `APP_URL` (your `https://….onrender.com` URL), and optionally `OPENROUTER_API_KEY`. `JWT_SECRET` is generated automatically.
+3. Deploy. `https://<app>.onrender.com/api/health` should return `{"ok":true,"db":"postgres","storage":"supabase"}`.
+
+Free Render instances sleep after 15 minutes of no traffic, and the first request then takes about 30 to 60 seconds. Your data is safe in Supabase. Free Supabase projects pause after a week of inactivity; you can restore them from the dashboard.
+
+### 3. Cloudflare (optional)
+For a custom domain, add the domain to Cloudflare, create a `CNAME` to `<app>.onrender.com`, and add the domain under the Render service's **Settings → Custom Domains**.
 
 ### Scaling later
-- **PostgreSQL:** the schema uses portable types. Swap `db.js` for `pg`, change `?` placeholders to `$1`, and replace `INTEGER PRIMARY KEY AUTOINCREMENT` with `SERIAL`/`IDENTITY`. With PostGIS, "near me" can move into SQL.
-- **Files:** move `uploads/` to S3 or Cloudflare R2. Keep the private bucket private and serve it through the same authenticated route, or with short-lived signed URLs.
-- **Email:** `server/lib/notify.js` is the single hook for adding a mail provider.
+- "Near me" runs in JS over verified listings; with PostGIS it can move into SQL.
+- `server/lib/notify.js` is the single hook for adding an email provider.
 
 ## Disclaimer
 

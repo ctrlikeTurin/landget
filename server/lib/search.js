@@ -72,30 +72,31 @@ const haversineKm = (a, b, c, d) => {
 // Converts duration bounds to months so "years" and "months" listings compare.
 const MONTHS = "(CASE WHEN l.duration_unit = 'years' THEN 12 ELSE 1 END)";
 
-function search(f = {}, { limit = 50, offset = 0 } = {}) {
+async function search(f = {}, { limit = 50, offset = 0 } = {}) {
   const where = ["l.status = 'verified'"];
-  const p = {};
+  const p = [];
+  const add = (sql, ...vals) => { where.push(sql); p.push(...vals); };
+  const has = (v) => v != null && v !== '';
   if (f.text) {
     // Every remaining word must appear somewhere in title/description/location.
-    String(f.text).split(/\s+/).filter(Boolean).slice(0, 6).forEach((w, i) => {
-      where.push(`(LOWER(l.title || ' ' || l.description || ' ' || l.town || ' ' || l.region || ' ' || l.country) LIKE @w${i})`);
-      p[`w${i}`] = `%${w.toLowerCase()}%`;
-    });
+    for (const w of String(f.text).split(/s+/).filter(Boolean).slice(0, 6)) {
+      add("LOWER(l.title || ' ' || l.description || ' ' || l.town || ' ' || l.region || ' ' || l.country) LIKE ?", `%${w.toLowerCase()}%`);
+    }
   }
-  if (f.land_type) { where.push('l.land_type = @land_type'); p.land_type = f.land_type; }
-  if (f.listing_type) { where.push("(',' || l.listing_types || ',') LIKE @lt"); p.lt = `%,${f.listing_type},%`; }
-  if (f.country) { where.push('LOWER(l.country) = LOWER(@country)'); p.country = f.country; }
-  if (f.region) { where.push("LOWER(l.region || ' ' || l.town) LIKE @region"); p.region = `%${String(f.region).toLowerCase()}%`; }
-  if (f.price_min != null && f.price_min !== '') { where.push('l.price >= @pmin'); p.pmin = Number(f.price_min); }
-  if (f.price_max != null && f.price_max !== '') { where.push('l.price <= @pmax'); p.pmax = Number(f.price_max); }
-  if (f.price_unit) { where.push('l.price_unit = @pu'); p.pu = f.price_unit; }
-  if (f.currency) { where.push('l.currency = @cur'); p.cur = f.currency; }
-  if (f.size_min != null && f.size_min !== '') { where.push('l.size_acres >= @smin'); p.smin = Number(f.size_min); }
-  if (f.size_max != null && f.size_max !== '') { where.push('l.size_acres <= @smax'); p.smax = Number(f.size_max); }
+  if (f.land_type) add('l.land_type = ?', f.land_type);
+  if (f.listing_type) add("(',' || l.listing_types || ',') LIKE ?", `%,${f.listing_type},%`);
+  if (f.country) add('LOWER(l.country) = LOWER(?)', f.country);
+  if (f.region) add("LOWER(l.region || ' ' || l.town) LIKE ?", `%${String(f.region).toLowerCase()}%`);
+  if (has(f.price_min)) add('l.price >= ?', Number(f.price_min));
+  if (has(f.price_max)) add('l.price <= ?', Number(f.price_max));
+  if (f.price_unit) add('l.price_unit = ?', f.price_unit);
+  if (f.currency) add('l.currency = ?', f.currency);
+  if (has(f.size_min)) add('l.size_acres >= ?', Number(f.size_min));
+  if (has(f.size_max)) add('l.size_acres <= ?', Number(f.size_max));
   if (f.duration_months) {
     // Listing's allowed range must include the requested duration.
-    where.push(`(l.duration_min IS NULL OR l.duration_min * ${MONTHS} <= @dm) AND (l.duration_max IS NULL OR l.duration_max * ${MONTHS} >= @dm)`);
-    p.dm = Number(f.duration_months);
+    const dm = Number(f.duration_months);
+    add(`(l.duration_min IS NULL OR l.duration_min * ${MONTHS} <= ?) AND (l.duration_max IS NULL OR l.duration_max * ${MONTHS} >= ?)`, dm, dm);
   }
 
   const order = {
@@ -104,11 +105,11 @@ function search(f = {}, { limit = 50, offset = 0 } = {}) {
     size_asc: 'l.size_acres ASC', size_desc: 'l.size_acres DESC',
   }[f.sort] || 'l.created_at DESC, l.id DESC';
 
-  let rows = db.prepare(`
+  let rows = await db.all(`
     SELECT l.*, (SELECT filename FROM photos WHERE listing_id = l.id ORDER BY position LIMIT 1) AS cover
-    FROM listings l WHERE ${where.join(' AND ')} ORDER BY ${order}`).all(p);
+    FROM listings l WHERE ${where.join(' AND ')} ORDER BY ${order}`, ...p);
 
-  // "Near me": distance filter in JS (SQLite has no trig; PostGIS would do this in SQL).
+  // "Near me": distance filter in JS (portable across SQLite/Postgres; PostGIS could do this in SQL).
   const lat = Number(f.near_lat), lng = Number(f.near_lng);
   if (Number.isFinite(lat) && Number.isFinite(lng) && f.near_lat !== undefined && f.near_lat !== '') {
     const radius = Number(f.radius_km) || 50;

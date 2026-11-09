@@ -1,7 +1,8 @@
 const express = require('express');
 const db = require('../db');
+const storage = require('../lib/storage');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { handleListingUpload, removeFile, PUBLIC_DIR, PRIVATE_DIR } = require('../lib/upload');
+const { handleListingUpload, storeFiles, discardFiles } = require('../lib/upload');
 const { parseQuery, search } = require('../lib/search');
 const notify = require('../lib/notify');
 const v = require('../lib/validate');
@@ -9,12 +10,9 @@ const v = require('../lib/validate');
 const router = express.Router();
 
 const json = (s, d) => { try { return JSON.parse(s); } catch { return d; } };
-const photosFor = db.prepare('SELECT id, filename FROM photos WHERE listing_id = ? ORDER BY position, id');
 
-// The single place that decides which listing fields a viewer may see.
-function serialize(l, viewer, { full = false } = {}) {
-  const isOwner = viewer && viewer.id === l.owner_id;
-  const isAdmin = viewer && viewer.role === 'admin';
+// Card-sized view of a listing; safe for anyone.
+function serialize(l, _viewer) {
   const out = {
     id: l.id, title: l.title, land_type: l.land_type,
     size: l.size, size_unit: l.size_unit, size_acres: l.size_acres,
@@ -22,27 +20,33 @@ function serialize(l, viewer, { full = false } = {}) {
     price: l.price, currency: l.currency, price_unit: l.price_unit, negotiable: !!l.negotiable,
     country: l.country, region: l.region, town: l.town, lat: l.lat, lng: l.lng,
     status: l.status, verified: l.status === 'verified',
-    cover: l.cover ? `/uploads/${l.cover}` : null,
+    cover: l.cover ? storage.publicUrl(l.cover) : null,
     created_at: l.created_at,
   };
   if (l.distance_km !== undefined) out.distance_km = l.distance_km;
-  if (!full) return out;
+  return out;
+}
 
-  Object.assign(out, {
+// The single place that decides which detail fields a viewer may see.
+async function serializeFull(l, viewer) {
+  const isOwner = !!(viewer && viewer.id === l.owner_id);
+  const isAdmin = !!(viewer && viewer.role === 'admin');
+  const photos = await db.all('SELECT id, filename FROM photos WHERE listing_id = ? ORDER BY position, id', l.id);
+  const owner = await db.get('SELECT name FROM users WHERE id = ?', l.owner_id);
+  const out = {
+    ...serialize({ ...l, cover: l.cover || (photos[0] && photos[0].filename) }, viewer),
     description: l.description,
     duration_min: l.duration_min, duration_max: l.duration_max, duration_unit: l.duration_unit,
     available_from: l.available_from,
     permitted_uses: json(l.permitted_uses, []), prohibited_uses: json(l.prohibited_uses, []),
     uses_notes: l.uses_notes, features: json(l.features, {}),
-    photos: photosFor.all(l.id).map((p) => ({ id: p.id, url: `/uploads/${p.filename}` })),
-    owner: { name: db.prepare('SELECT name FROM users WHERE id = ?').get(l.owner_id)?.name },
+    photos: photos.map((p) => ({ id: p.id, url: storage.publicUrl(p.filename) })),
+    owner: { name: owner && owner.name },
     show_deed: !!l.show_deed,
-    is_owner: !!isOwner,
-  });
-  // Contacts are shown only to logged-in users.
-  out.contacts = viewer
-    ? { phone: l.contact_phone, whatsapp: l.contact_whatsapp, email: l.contact_email }
-    : null;
+    is_owner: isOwner,
+    // Contacts are shown only to logged-in users.
+    contacts: viewer ? { phone: l.contact_phone, whatsapp: l.contact_whatsapp, email: l.contact_email } : null,
+  };
   // Deed: public only when the owner opted in; always visible to owner/admin.
   if (l.deed_file && (isOwner || isAdmin || (l.show_deed && l.status === 'verified'))) {
     out.deed_url = `/api/files/${l.id}/deed`;
@@ -60,49 +64,48 @@ function serialize(l, viewer, { full = false } = {}) {
   return out;
 }
 
-const getListing = (id) => db.prepare('SELECT * FROM listings WHERE id = ?').get(Number(id));
+const getListing = (id) => db.get('SELECT * FROM listings WHERE id = ?', Number(id) || 0);
 
-function ownListing(req, res) {
-  const l = getListing(req.params.id);
+async function ownListing(req, res) {
+  const l = await getListing(req.params.id);
   if (!l) { res.status(404).json({ error: 'Listing not found.' }); return null; }
   if (l.owner_id !== req.user.id && req.user.role !== 'admin') { res.status(403).json({ error: 'Not your listing.' }); return null; }
   return l;
 }
 
 // Flags every non-rejected listing that shares this deed number (fraud signal for admins).
-function flagDuplicateDeeds(deed) {
-  if (!deed) return false;
-  const rows = db.prepare("SELECT id FROM listings WHERE deed_number = ? AND status != 'rejected'").all(deed);
-  const dup = rows.length > 1;
-  db.prepare("UPDATE listings SET duplicate_deed = ? WHERE deed_number = ? AND status != 'rejected'").run(dup ? 1 : 0, deed);
-  return dup;
+async function flagDuplicateDeeds(deed) {
+  if (!deed) return;
+  const rows = await db.all("SELECT id FROM listings WHERE deed_number = ? AND status != 'rejected'", deed);
+  await db.run("UPDATE listings SET duplicate_deed = ? WHERE deed_number = ? AND status != 'rejected'", rows.length > 1 ? 1 : 0, deed);
 }
 
-function submitForReview(l) {
+async function submitForReview(l) {
   if (!l.deed_file || !l.id_file) {
-    const e = new Error('Upload both the title deed and your national ID or passport before submitting for verification.');
-    e.status = 400; throw e;
+    throw new v.ValidationError('Upload both the title deed and your national ID or passport before submitting for verification.');
   }
-  db.prepare("UPDATE listings SET status = 'pending', reject_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(l.id);
-  flagDuplicateDeeds(l.deed_number);
-  for (const a of db.prepare("SELECT id FROM users WHERE role = 'admin'").all()) {
-    notify(a.id, 'review', 'New listing to verify', l.title, `#/admin`);
+  await db.run("UPDATE listings SET status = 'pending', reject_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", l.id);
+  await flagDuplicateDeeds(l.deed_number);
+  for (const a of await db.all("SELECT id FROM users WHERE role = 'admin'")) {
+    await notify(a.id, 'review', 'New listing to verify', l.title, '#/admin');
   }
 }
 
-function saveFiles(listingId, files, prev) {
+// Records uploaded files on the listing; replaced documents are deleted from storage afterwards.
+async function attachFiles(q, listingId, files) {
+  const replaced = [];
   const photos = (files && files.photos) || [];
-  const start = db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS n FROM photos WHERE listing_id = ?').get(listingId).n;
-  const add = db.prepare('INSERT INTO photos (listing_id, filename, position) VALUES (?, ?, ?)');
-  photos.forEach((f, i) => add.run(listingId, f.filename, start + i));
-  if (files && files.deed) {
-    removeFile(PRIVATE_DIR, prev && prev.deed_file);
-    db.prepare('UPDATE listings SET deed_file = ? WHERE id = ?').run(files.deed[0].filename, listingId);
+  const { n } = await q.get('SELECT COALESCE(MAX(position), -1) + 1 AS n FROM photos WHERE listing_id = ?', listingId);
+  for (const [i, f] of photos.entries()) {
+    await q.run('INSERT INTO photos (listing_id, filename, position) VALUES (?, ?, ?)', listingId, f.filename, n + i);
   }
-  if (files && files.id_doc) {
-    removeFile(PRIVATE_DIR, prev && prev.id_file);
-    db.prepare('UPDATE listings SET id_file = ? WHERE id = ?').run(files.id_doc[0].filename, listingId);
+  for (const [field, col] of [['deed', 'deed_file'], ['id_doc', 'id_file']]) {
+    if (!files || !files[field]) continue;
+    const prev = await q.get(`SELECT ${col} AS f FROM listings WHERE id = ?`, listingId);
+    if (prev && prev.f) replaced.push(prev.f);
+    await q.run(`UPDATE listings SET ${col} = ? WHERE id = ?`, files[field][0].filename, listingId);
   }
+  return replaced;
 }
 
 // ---- Public ----
@@ -115,7 +118,7 @@ router.get('/meta', (_req, res) => {
   });
 });
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const q = req.query;
   // Explicit filters win over anything parsed from the free-text box.
   const parsed = q.q ? parseQuery(q.q) : {};
@@ -123,140 +126,149 @@ router.get('/', (req, res) => {
   for (const k of ['land_type', 'listing_type', 'country', 'region', 'price_min', 'price_max', 'price_unit', 'currency', 'size_min', 'size_max', 'duration_months', 'sort', 'near_lat', 'near_lng', 'radius_km']) {
     if (q[k] !== undefined && q[k] !== '') filters[k] = q[k];
   }
-  // UI sizes are in acres already.
   const limit = Math.min(Number(q.limit) || 100, 200);
   const offset = Math.max(Number(q.offset) || 0, 0);
-  const { total, rows } = search(filters, { limit, offset });
-  const saved = req.user ? new Set(db.prepare('SELECT listing_id FROM saves WHERE user_id = ?').all(req.user.id).map((r) => r.listing_id)) : new Set();
+  const { total, rows } = await search(filters, { limit, offset });
+  const saved = req.user ? new Set((await db.all('SELECT listing_id FROM saves WHERE user_id = ?', req.user.id)).map((r) => r.listing_id)) : new Set();
   res.json({ total, parsed, results: rows.map((r) => ({ ...serialize(r, req.user), saved: saved.has(r.id) })) });
 });
 
 // ---- Lender ----
 
-router.get('/mine', requireRole('lender', 'admin'), (req, res) => {
-  const rows = db.prepare(`
+router.get('/mine', requireRole('lender', 'admin'), async (req, res) => {
+  const rows = await db.all(`
     SELECT l.*,
-      (SELECT filename FROM photos WHERE listing_id = l.id ORDER BY position LIMIT 1) AS cover,
       (SELECT COUNT(*) FROM saves WHERE listing_id = l.id) AS saves,
       (SELECT COUNT(*) FROM threads WHERE listing_id = l.id) AS inquiries
-    FROM listings l WHERE owner_id = ? ORDER BY updated_at DESC`).all(req.user.id);
-  res.json({ results: rows.map((r) => ({ ...serialize(r, req.user, { full: true }), saves: r.saves, inquiries: r.inquiries })) });
+    FROM listings l WHERE owner_id = ? ORDER BY updated_at DESC`, req.user.id);
+  const results = [];
+  for (const r of rows) results.push({ ...(await serializeFull(r, req.user)), saves: r.saves, inquiries: r.inquiries });
+  res.json({ results });
 });
 
-router.get('/saved', requireAuth, (req, res) => {
-  const rows = db.prepare(`
+router.get('/saved', requireAuth, async (req, res) => {
+  const rows = await db.all(`
     SELECT l.*, (SELECT filename FROM photos WHERE listing_id = l.id ORDER BY position LIMIT 1) AS cover
     FROM saves s JOIN listings l ON l.id = s.listing_id
-    WHERE s.user_id = ? AND l.status = 'verified' ORDER BY s.created_at DESC`).all(req.user.id);
+    WHERE s.user_id = ? AND l.status = 'verified' ORDER BY s.created_at DESC`, req.user.id);
   res.json({ results: rows.map((r) => ({ ...serialize(r, req.user), saved: true })) });
 });
 
-router.post('/', requireRole('lender'), handleListingUpload, (req, res) => {
+router.post('/', requireRole('lender'), handleListingUpload, async (req, res) => {
   const files = req.files || {};
-  const discard = () => Object.values(files).flat().forEach((f) => removeFile(f.fieldname === 'photos' ? PUBLIC_DIR : PRIVATE_DIR, f.filename));
-  let data;
-  try {
-    data = v.listingInput(req.body);
-    if (v.bool(req.body.submit) && (!files.deed || !files.id_doc)) {
-      throw new v.ValidationError('Upload both the title deed and your national ID or passport before submitting for verification, or save as a draft.');
-    }
-  } catch (e) { discard(); throw e; }
-  const cols = Object.keys(data);
-  const id = db.transaction(() => {
-    const { lastInsertRowid } = db.prepare(
-      `INSERT INTO listings (owner_id, ${cols.join(', ')}) VALUES (@owner_id, ${cols.map((c) => '@' + c).join(', ')})`,
-    ).run({ owner_id: req.user.id, ...data });
-    saveFiles(lastInsertRowid, req.files);
-    return lastInsertRowid;
-  })();
-  if (v.bool(req.body.submit)) submitForReview(getListing(id));
-  res.status(201).json({ listing: serialize(getListing(id), req.user, { full: true }) });
-});
-
-router.put('/:id', requireRole('lender', 'admin'), handleListingUpload, (req, res) => {
-  const l = ownListing(req, res); if (!l) return;
   const data = v.listingInput(req.body);
-  db.transaction(() => {
-    db.prepare(`UPDATE listings SET ${Object.keys(data).map((c) => `${c} = @${c}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
-      .run({ ...data, id: l.id });
-    saveFiles(l.id, req.files, l);
-  })();
-  if (data.deed_number !== l.deed_number) { flagDuplicateDeeds(l.deed_number); flagDuplicateDeeds(data.deed_number); }
-  const fresh = getListing(l.id);
+  const submit = v.bool(req.body.submit);
+  if (submit && (!files.deed || !files.id_doc)) {
+    throw new v.ValidationError('Upload both the title deed and your national ID or passport before submitting for verification, or save as a draft.');
+  }
+  await storeFiles(files);
+  let id;
+  try {
+    const cols = Object.keys(data);
+    id = await db.tx(async (q) => {
+      const newId = await q.insert(
+        `INSERT INTO listings (owner_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`,
+        req.user.id, ...cols.map((c) => data[c]),
+      );
+      await attachFiles(q, newId, files);
+      return newId;
+    });
+  } catch (e) { await discardFiles(files); throw e; }
+  if (submit) await submitForReview(await getListing(id));
+  res.status(201).json({ listing: await serializeFull(await getListing(id), req.user) });
+});
+
+router.put('/:id', requireRole('lender', 'admin'), handleListingUpload, async (req, res) => {
+  const l = await ownListing(req, res); if (!l) return;
+  const data = v.listingInput(req.body);
+  await storeFiles(req.files);
+  let replaced;
+  try {
+    replaced = await db.tx(async (q) => {
+      const cols = Object.keys(data);
+      await q.run(`UPDATE listings SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, ...cols.map((c) => data[c]), l.id);
+      return attachFiles(q, l.id, req.files);
+    });
+  } catch (e) { await discardFiles(req.files); throw e; }
+  for (const f of replaced) await storage.remove('private', f);
+  if (data.deed_number !== l.deed_number) { await flagDuplicateDeeds(l.deed_number); await flagDuplicateDeeds(data.deed_number); }
   // Any edit to a published or rejected listing goes back through verification.
-  if (v.bool(req.body.submit) || ['verified', 'rejected'].includes(l.status)) submitForReview(fresh);
-  res.json({ listing: serialize(getListing(l.id), req.user, { full: true }) });
+  if (v.bool(req.body.submit) || ['verified', 'rejected'].includes(l.status)) await submitForReview(await getListing(l.id));
+  res.json({ listing: await serializeFull(await getListing(l.id), req.user) });
 });
 
-router.post('/:id/submit', requireRole('lender'), (req, res) => {
-  const l = ownListing(req, res); if (!l) return;
-  submitForReview(l);
-  res.json({ listing: serialize(getListing(l.id), req.user, { full: true }) });
+router.post('/:id/submit', requireRole('lender'), async (req, res) => {
+  const l = await ownListing(req, res); if (!l) return;
+  await submitForReview(l);
+  res.json({ listing: await serializeFull(await getListing(l.id), req.user) });
 });
 
-router.post('/:id/pause', requireRole('lender'), (req, res) => {
-  const l = ownListing(req, res); if (!l) return;
+router.post('/:id/pause', requireRole('lender'), async (req, res) => {
+  const l = await ownListing(req, res); if (!l) return;
   if (l.status !== 'verified') return res.status(400).json({ error: 'Only live (verified) listings can be paused.' });
-  db.prepare("UPDATE listings SET status = 'paused', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(l.id);
+  await db.run("UPDATE listings SET status = 'paused', updated_at = CURRENT_TIMESTAMP WHERE id = ?", l.id);
   res.json({ ok: true });
 });
 
-router.post('/:id/resume', requireRole('lender'), (req, res) => {
-  const l = ownListing(req, res); if (!l) return;
+router.post('/:id/resume', requireRole('lender'), async (req, res) => {
+  const l = await ownListing(req, res); if (!l) return;
   if (l.status !== 'paused') return res.status(400).json({ error: 'Listing is not paused.' });
-  db.prepare("UPDATE listings SET status = 'verified', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(l.id);
+  await db.run("UPDATE listings SET status = 'verified', updated_at = CURRENT_TIMESTAMP WHERE id = ?", l.id);
   res.json({ ok: true });
 });
 
-router.delete('/:id', requireRole('lender', 'admin'), (req, res) => {
-  const l = ownListing(req, res); if (!l) return;
-  for (const p of photosFor.all(l.id)) removeFile(PUBLIC_DIR, p.filename);
-  removeFile(PRIVATE_DIR, l.deed_file);
-  removeFile(PRIVATE_DIR, l.id_file);
-  db.prepare('DELETE FROM listings WHERE id = ?').run(l.id);
-  flagDuplicateDeeds(l.deed_number);
+router.delete('/:id', requireRole('lender', 'admin'), async (req, res) => {
+  const l = await ownListing(req, res); if (!l) return;
+  const photos = await db.all('SELECT filename FROM photos WHERE listing_id = ?', l.id);
+  await db.run('DELETE FROM listings WHERE id = ?', l.id);
+  await Promise.all([
+    ...photos.map((p) => storage.remove('public', p.filename)),
+    storage.remove('private', l.deed_file),
+    storage.remove('private', l.id_file),
+  ]);
+  await flagDuplicateDeeds(l.deed_number);
   res.json({ ok: true });
 });
 
-router.delete('/:id/photos/:photoId', requireRole('lender'), (req, res) => {
-  const l = ownListing(req, res); if (!l) return;
-  const p = db.prepare('SELECT * FROM photos WHERE id = ? AND listing_id = ?').get(Number(req.params.photoId), l.id);
+router.delete('/:id/photos/:photoId', requireRole('lender'), async (req, res) => {
+  const l = await ownListing(req, res); if (!l) return;
+  const p = await db.get('SELECT * FROM photos WHERE id = ? AND listing_id = ?', Number(req.params.photoId) || 0, l.id);
   if (!p) return res.status(404).json({ error: 'Photo not found.' });
-  removeFile(PUBLIC_DIR, p.filename);
-  db.prepare('DELETE FROM photos WHERE id = ?').run(p.id);
+  await db.run('DELETE FROM photos WHERE id = ?', p.id);
+  await storage.remove('public', p.filename);
   res.json({ ok: true });
 });
 
 // ---- Detail, saves, reports ----
 
-router.get('/:id', (req, res) => {
-  const l = getListing(req.params.id);
+router.get('/:id', async (req, res) => {
+  const l = await getListing(req.params.id);
   const canSeeUnpublished = req.user && l && (req.user.id === l.owner_id || req.user.role === 'admin');
   if (!l || (l.status !== 'verified' && !canSeeUnpublished)) return res.status(404).json({ error: 'Listing not found.' });
-  if (!req.user || req.user.id !== l.owner_id) db.prepare('UPDATE listings SET views = views + 1 WHERE id = ?').run(l.id);
-  const out = serialize(l, req.user, { full: true });
-  out.saved = !!(req.user && db.prepare('SELECT 1 FROM saves WHERE user_id = ? AND listing_id = ?').get(req.user.id, l.id));
+  if (!req.user || req.user.id !== l.owner_id) await db.run('UPDATE listings SET views = views + 1 WHERE id = ?', l.id);
+  const out = await serializeFull(l, req.user);
+  out.saved = !!(req.user && await db.get('SELECT 1 FROM saves WHERE user_id = ? AND listing_id = ?', req.user.id, l.id));
   res.json({ listing: out });
 });
 
-router.post('/:id/save', requireAuth, (req, res) => {
-  const l = getListing(req.params.id);
+router.post('/:id/save', requireAuth, async (req, res) => {
+  const l = await getListing(req.params.id);
   if (!l || l.status !== 'verified') return res.status(404).json({ error: 'Listing not found.' });
-  const exists = db.prepare('SELECT 1 FROM saves WHERE user_id = ? AND listing_id = ?').get(req.user.id, l.id);
-  if (exists) db.prepare('DELETE FROM saves WHERE user_id = ? AND listing_id = ?').run(req.user.id, l.id);
-  else db.prepare('INSERT INTO saves (user_id, listing_id) VALUES (?, ?)').run(req.user.id, l.id);
+  const exists = await db.get('SELECT 1 FROM saves WHERE user_id = ? AND listing_id = ?', req.user.id, l.id);
+  if (exists) await db.run('DELETE FROM saves WHERE user_id = ? AND listing_id = ?', req.user.id, l.id);
+  else await db.run('INSERT INTO saves (user_id, listing_id) VALUES (?, ?)', req.user.id, l.id);
   res.json({ saved: !exists });
 });
 
-router.post('/:id/report', requireAuth, (req, res) => {
-  const l = getListing(req.params.id);
+router.post('/:id/report', requireAuth, async (req, res) => {
+  const l = await getListing(req.params.id);
   if (!l) return res.status(404).json({ error: 'Listing not found.' });
   const reason = v.str(req.body.reason, 'Reason', { min: 5, max: 1000, required: true });
-  db.prepare('INSERT INTO reports (listing_id, reporter_id, reason) VALUES (?, ?, ?)').run(l.id, req.user.id, reason);
-  for (const a of db.prepare("SELECT id FROM users WHERE role = 'admin'").all()) {
-    notify(a.id, 'report', 'Listing reported', `${l.title}: ${reason.slice(0, 120)}`, '#/admin');
+  await db.run('INSERT INTO reports (listing_id, reporter_id, reason) VALUES (?, ?, ?)', l.id, req.user.id, reason);
+  for (const a of await db.all("SELECT id FROM users WHERE role = 'admin'")) {
+    await notify(a.id, 'report', 'Listing reported', `${l.title}: ${reason.slice(0, 120)}`, '#/admin');
   }
   res.status(201).json({ ok: true });
 });
 
-module.exports = { router, serialize, getListing };
+module.exports = { router, serialize, serializeFull, getListing };

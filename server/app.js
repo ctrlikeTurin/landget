@@ -5,10 +5,15 @@ const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
 const { rateLimit } = require('express-rate-limit');
 const { loadUser } = require('./middleware/auth');
-const { PUBLIC_DIR } = require('./lib/upload');
+const db = require('./db');
+const storage = require('./lib/storage');
 
 const app = express();
-app.set('trust proxy', 1); // Render/Railway sit behind one proxy
+app.set('trust proxy', 1); // Render sits behind one proxy
+
+// Don't serve requests until the schema and storage buckets exist.
+const ready = Promise.all([db.ready, storage.ready]);
+app.use((_req, _res, next) => { ready.then(() => next(), next); });
 
 app.use(helmet({
   contentSecurityPolicy: {
@@ -16,7 +21,7 @@ app.use(helmet({
     directives: {
       'script-src': ["'self'", 'https://unpkg.com'],
       'style-src': ["'self'", "'unsafe-inline'", 'https://unpkg.com'],
-      'img-src': ["'self'", 'data:', 'blob:', 'https://*.tile.openstreetmap.org', 'https://server.arcgisonline.com', 'https://unpkg.com'],
+      'img-src': ["'self'", 'data:', 'blob:', 'https://*.tile.openstreetmap.org', 'https://server.arcgisonline.com', 'https://unpkg.com', ...(storage.publicOrigin ? [storage.publicOrigin] : [])],
       'connect-src': ["'self'", 'https://nominatim.openstreetmap.org'],
       'frame-src': ["'self'"],
     },
@@ -48,11 +53,15 @@ app.use('/api/admin', require('./routes/admin'));
 app.use('/api/chat', require('./routes/chat'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/files', require('./routes/files'));
-app.get('/api/health', (_req, res) => res.json({ ok: true }));
+app.get('/api/health', async (_req, res) => {
+  await db.get('SELECT 1 AS ok');
+  res.json({ ok: true, db: db.kind, storage: storage.kind });
+});
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
 
-// Only listing photos are public. uploads/private has no static route at all.
-app.use('/uploads', express.static(PUBLIC_DIR, { maxAge: '7d', index: false }));
+// Local storage only: listing photos are public; uploads/private has no static route at all.
+// With Supabase, photos are served from the public bucket's own URL.
+if (storage.publicDir) app.use('/uploads', express.static(storage.publicDir, { maxAge: '7d', index: false }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // eslint-disable-next-line no-unused-vars

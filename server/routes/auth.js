@@ -17,7 +17,7 @@ const loginLimiter = rateLimit({
 
 const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, phone: u.phone, role: u.role });
 
-router.post('/register', loginLimiter, (req, res) => {
+router.post('/register', loginLimiter, async (req, res) => {
   const b = req.body || {};
   const name = v.str(b.name, 'Name', { min: 2, max: 80, required: true });
   const email = v.email(b.email);
@@ -27,20 +27,19 @@ router.post('/register', loginLimiter, (req, res) => {
   if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
     return res.status(400).json({ error: 'Password must be at least 8 characters and include a letter and a number.' });
   }
-  if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) {
+  if (await db.get('SELECT 1 FROM users WHERE email = ?', email)) {
     return res.status(409).json({ error: 'An account with this email already exists.' });
   }
   const hash = bcrypt.hashSync(password, 10);
-  const { lastInsertRowid } = db.prepare('INSERT INTO users (name, email, phone, password_hash, role) VALUES (?, ?, ?, ?, ?)')
-    .run(name, email, phone, hash, role);
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(lastInsertRowid);
+  const id = await db.insert('INSERT INTO users (name, email, phone, password_hash, role) VALUES (?, ?, ?, ?, ?)', name, email, phone, hash, role);
+  const user = await db.get('SELECT * FROM users WHERE id = ?', id);
   issue(res, user);
   res.status(201).json({ user: publicUser(user) });
 });
 
-router.post('/login', loginLimiter, (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   const email = v.email(req.body && req.body.email);
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  const user = await db.get('SELECT * FROM users WHERE email = ?', email);
   // Compare even when the user is missing so response time doesn't reveal which emails exist.
   const ok = bcrypt.compareSync(String((req.body && req.body.password) || ''), user ? user.password_hash : '$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinv');
   if (!user || !ok) return res.status(401).json({ error: 'Email or password is incorrect.' });
@@ -58,10 +57,10 @@ router.get('/me', (req, res) => {
   res.json({ user: req.user ? publicUser(req.user) : null });
 });
 
-router.patch('/me', requireAuth, (req, res) => {
+router.patch('/me', requireAuth, async (req, res) => {
   const name = v.str(req.body.name, 'Name', { min: 2, max: 80, required: true });
   const phone = v.str(req.body.phone, 'Phone', { max: 30 }) || null;
-  db.prepare('UPDATE users SET name = ?, phone = ? WHERE id = ?').run(name, phone, req.user.id);
+  await db.run('UPDATE users SET name = ?, phone = ? WHERE id = ?', name, phone, req.user.id);
   res.json({ user: publicUser({ ...req.user, name, phone }) });
 });
 

@@ -7,6 +7,8 @@ process.env.DB_PATH = ':memory:';
 process.env.UPLOAD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'landlink-test-'));
 process.env.JWT_SECRET = 'test-secret';
 process.env.OPENROUTER_API_KEY = ''; // force rule-based chat
+process.env.DATABASE_URL = ''; // tests always use SQLite + local storage; '' stops dotenv refilling it from .env
+process.env.SUPABASE_URL = '';
 
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -40,7 +42,8 @@ function listingForm(req, extra = {}) {
 let admin, lender, customer, listingId;
 
 before(async () => {
-  db.prepare("INSERT INTO users (name, email, password_hash, role) VALUES ('Admin', 'admin@t.test', ?, 'admin')").run(bcrypt.hashSync('Admin#1234', 4));
+  await db.ready;
+  await db.run("INSERT INTO users (name, email, password_hash, role) VALUES ('Admin', 'admin@t.test', ?, 'admin')", bcrypt.hashSync('Admin#1234', 4));
   admin = agent();
   await admin.post('/api/auth/login').send({ email: 'admin@t.test', password: 'Admin#1234' }).expect(200);
   lender = await register('lender', 'lender@t.test');
@@ -106,7 +109,7 @@ describe('listing permissions', () => {
     await admin.get(`/api/files/${listingId}/deed`).expect(200);
   });
   test('uploads/private is not reachable statically', async () => {
-    const file = db.prepare('SELECT id_file FROM listings WHERE id = ?').get(listingId).id_file;
+    const file = (await db.get('SELECT id_file FROM listings WHERE id = ?', listingId)).id_file;
     await request(app).get(`/uploads/${file}`).expect(404);
     await request(app).get(`/uploads/../private/${file}`).expect(404);
   });
